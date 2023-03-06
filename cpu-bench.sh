@@ -1,24 +1,18 @@
 #!/bin/bash
 
-# todo license
-
 #########################################
 # GLOBAL VARIABLES
 #########################################
 
-TEST_CODE=false # todo remove
+TEST_CODE=false # TODO remove
 
 # default list of threads to test
 THREAD_TESTS=(1 2 4 6 8 12 16 24 32)
-
-AUTO_ACCEPT=false # todo remove
 
 CPU_SPEEDS=()
 LATENCY_MINIMUMS=()
 LATENCY_AVERAGES=()
 LATENCY_MAXIMUMS=()
-
-LINUX_DISTRIBUTION=$(lsb_release -is) # todo remove
 
 DELAY=0
 DURATION=10
@@ -27,9 +21,16 @@ LOWER=1
 UPPER=$(nproc)
 INCREMENT=8
 
+SILENT=false
+
+OUTPUT_SETS=0
+
 OUTPUT_MODE='SERIAL' # other options: TABLE JSON YAML
 TEST_CASE='FREQUENT' # other options: COMPLETE
-STATE='LOADING'      # other options: TEST WAIT
+
+STATE='LOAD' # other options: TEST WAIT
+STATE_FILE=''
+BACKGROUND_JOBS=() # TODO may be replaced by jobs command due to shell instance.
 
 START_TIME=0
 END_TIME=0
@@ -39,40 +40,140 @@ END_TIME=0
 # FUNCTIONS
 #########################################
 
-function debug
+function Debug
 {
-	section 'DEBUG'
+	Section 'DEBUG'
 	echo "TEST_CODE          : $TEST_CODE"
 	echo "THREAD_TESTS       : ${THREAD_TESTS[@]}"
 	echo "CPU_SPEEDS         : ${CPU_SPEEDS[@]}"
-	echo "AUTO_ACCEPT        : $AUTO_ACCEPT"
 	echo "LATENCY_MINIMUMS   : ${LATENCY_MINIMUMS[@]}"
 	echo "LATENCY_AVERAGES   : ${LATENCY_AVERAGES[@]}"
 	echo "LATENCY_MAXIMUMS   : ${LATENCY_MAXIMUMS[@]}"
-	echo "LINUX_DISTRIBUTION : $LINUX_DISTRIBUTION"
+	echo "STATE FILE         : $STATE_FILE"
 	echo "DELAY              : $DELAY"
+	echo "DURATION           : $DURATION"
 	echo "LOWER              : $LOWER"
 	echo "UPPER              : $UPPER"
 	echo "TEST_CASE          : $TEST_CASE"
 	echo "OUTPUT_MODE        : $OUTPUT_MODE"
+	echo "OUTPUT_SET         : $OUTPUT_SET"
 }
 
+function Assert # <token> <token> <message>
+{
+	local measured="$1"
+	local expected="$2"
+	local message="$3"
+
+	if [[ "$measured" != "$expected" ]]
+	then
+		Abort "$message"
+	fi
+}
+
+function Section
+{
+	local message="$@"
+	local length=$(max 28 ${#message})
+	local bridge="##$(repeat '#' $length)##"
+	
+	printf "\n$bridge\n"
+	printf "# %-${length}s #" "$@"
+	printf "\n$bridge\n"
+}
+
+# TODO tput column mktemp
 function check_dependencies
 {
 	if ! command -v sysbench &> /dev/null
 	then
-		abort 'Dependency "sysbench" is not installed.'
+		Abort 'Dependency "sysbench" is not installed.'
 	fi
 }
 
-# todo broken
-function set_flags
+# TODO test that this works to capture flags correctly and returns correct values
+# TODO -asdf flags
+# TODO input safety
+# TODO function to abort on command formatting issues
+function CheckFlags # <flags> <flag argument>...
 {
-	echo 'broken'
+	local checking=true
+	while [[ checking && $# -gt 0 ]]
+	do
+		case $1 in
+		--all|-a)
+			TEST_CASE='COMPLETE'
+			;;
+		--lower|-l)
+			LOWER=$2
+			shift
+			;;
+		--upper|-u)
+			UPPER=$2
+			shift
+			;;
+			
+		--delay|-D)
+			DELAY=$2
+			shift
+			;;
+		--duration|-d)
+			DURATION=$2
+			shift
+			;;
+			
+		--json|-j)
+			OUTPUT_MODE='JSON'
+			(( OUTPUT_SETS += 1 ))
+			;;
+		--table|-t)
+			OUTPUT_MODE='TABLE'
+			(( OUTPUT_SETS += 1 ))
+			;;
+		--yaml|-y)
+			OUTPUT_MODE='YAML'
+			(( OUTPUT_SETS += 1 ))
+			;;
+			
+		--silent|-s)
+			SILENT=true
+			;;
+		--) # might not handle alternate flags well
+			checking=false
+			;;
+		*)	# TODO write this message
+			Abort "format error message goes here"
+			;;
+		esac
+		
+		shift
+	done
+	
+	if [[ $OUTPUT_SETS -gt 1 ]]
+	then
+		Abort 'Multiple data display methods requested.'
+	fi
+	
+	if [[ $LOWER -lt 1 ]]
+	then
+		Abort 'Lower thread limit cannot be below 1.' # TODO should automatically handle instead maybe?
+	fi
+	
+	if [[ $UPPER -gt 8192 ]]
+	then
+		Abort 'Upeer thread limit cannot exceed 8192.'
+	fi
+	
+	if [[ $UPPER -lt $LOWER ]]
+	then
+		Abort "Impossible threads range ($LOWER-$UPPER)."
+	fi
+	
+#	echo $@ # TODO do something with leftover arguments??
 }
 
-# todo test this
-# todo use this
+# TODO test this
+# TODO use this
 function is_integer
 {
 	result=0
@@ -84,70 +185,105 @@ function is_integer
 	return $result
 }
 
-# todo refactor
-function time_estimate
+function TimeEstimate
 {
 	local test_count=${#THREAD_TESTS[@]}
 	local delay_count=$(( $test_count - 1 ))
-	local estimate=$(( $test_count * $DURATION + $delay_count * $DELAY ))
-	echo $estimate
+	echo $(( $DURATION * $test_count + $DELAY * $delay_count ))
 }
 
-function abort
+function Abort
 {
-	local message=$@
-	printf '%s\n' "$message" >&2
+	local message="$@"
+	echo $message >&2
+	echo 'Aborting.'
 	exit 1
 }
 
-function yes_or_no
+# TODO trap temp file
+function CreateState
 {
-	local reply
-	read -p "$@" reply
-	
-	local result=2
-	case $reply in
-	[Yy]* | '')
-		result=0
-		;;
-	[Nn]*)
-		result=1
-		;;
-	esac
-	return $result
+	if [[ ! -e $STATE_FILE ]]
+	then
+		STATE_FILE=$(mktemp)
+	fi
+	trap 'ClearState' SIGINT # TODO what is the best place for a SIGINT trap?
 }
 
-#todo rename for time confirmation
-function confirmation
+function ClearState
 {
-	if ! $AUTO_ACCEPT
+	if [[ -e $STATE_FILE ]]
 	then
-		echo "Testing duration: `time_estimate` seconds"
-		yes_or_no 'Continue? [Y/n]: '
-		local result=$?
-		if [[ $result -ne 0 ]]
-		then
-			abort $result
-		fi
+		rm $STATE_FILE
 	fi
+	STATE_FILE=''
+}
+
+function GetState
+{
+	if [[ -e $STATE_FILE ]]
+	then
+		local state=(`cat $STATE_FILE`)
+		case ${state[0]} in
+		TEST)
+			local threads=${state[1]}
+			local size=$(max_item_size ${THREAD_TESTS[@]})
+			printf "Threads: %-${size}d" $threads
+			;;
+		WAIT)
+			printf 'Waiting'
+			;;
+		*)
+			printf 'Loading..'
+			;;
+	esac
+	fi
+}
+
+function SetState # <task name> <thread number>
+{
+	if [[ -e $STATE_FILE ]]
+	then
+		echo "$@" > $STATE_FILE
+	fi
+}
+
+function RunJobs # <string>...
+{
+	while [[ $# -gt 0 ]]
+	do
+		$1 &
+		BACKGROUND_JOBS=${!}
+		shift
+	done
+}
+
+function WaitJobs
+{
+	for pid in ${BACKGROUND_JOBS[@]}
+	do
+		wait $pid
+	done
+}
+
+# TODO look into proper job control to kill all on SIGINT
+function KillJobs
+{
+	for pid in ${BACKGROUND_JOBS[@]}
+	do
+		kill $pid
+	done
 }
 
 #########################################
 # ARRAY FUNCTIONS
 #########################################
 
-# trim tests down to range
-function trim_array
+function TrimArray # "<array> " <integer> <integer>
 {
-	local second=$(( $# - 2 ))
-	local  third=$(( $# - 1 ))
-
-	local array=($@)
-	local low=${array[$second]}
-	local high=${array[$third]}
-
-	unset array[$second]
-	unset array[$third]
+	local array=($1)
+	local low=$2
+	local high=$3
 
 	for key in ${!array[@]}
 	do
@@ -160,7 +296,7 @@ function trim_array
 	echo ${array[@]}
 }
 
-function fill_array
+function FillArray # <integer> <integer>
 {
 	local low=$1
 	local high=$2
@@ -168,22 +304,17 @@ function fill_array
 	seq $low 1 $high
 }
 
-# extend tests to maximum
-# todo clean
-function extend_array
+function ExtendArray # "<array> " <integer>
 {
-	local last=$(( $# - 1 ))
-
-	local array=($@)
+	local array=($1)
+	local limit=$2
+	
 	local next=$INCREMENT
-	local limit=${array[$last]}
-
-	unset array[$last]	
 
 	# determine next
-	if [[ $# -gt 1 ]]
+	if [[ ${#array[@]} -gt 0 ]]
 	then
-		next=$(( ${array[-1]} + $INCREMENT ))
+		(( next += ${array[-1]} ))
 	fi
 	
 	# extend
@@ -196,32 +327,36 @@ function extend_array
 	echo ${array[@]}
 }
 
-# todo rename
-function add_array_limits
+# TODO change expect parameters?
+function ArrayAddLimits # <array>
 {
 	local array=($@)
 	
-	if [[ $# -eq 0 ]]
+	if [[ $# -gt 0 ]]
 	then
-		return 1
-	fi
-	
-	if [[ $LOWER -lt ${array[0]} && $LOWER -gt 0 ]]
-	then
-		echo "$LOWER "
-	fi
-	
-	echo ${array[@]}
-	
-	if [[ $UPPER -gt ${array[-1]} ]]
-	then
-		echo " $UPPER"
+		if [[ $LOWER -lt ${array[0]} && $LOWER -gt 0 ]]
+		then
+			echo "$LOWER "
+		fi
+
+		echo ${array[@]}
+
+		if [[ $UPPER -gt ${array[-1]} ]]
+		then
+			echo " $UPPER"
+		fi
 	fi
 }
 
-function max
+function Length # <any>...
 {
-	if [[ $1 -gt $2 ]]
+	local input="$@"
+	echo ${#input}
+}
+
+function max # <integer> <integer>
+{
+	if [[ $(bc <<< "$1 > $2") -eq 1 ]]
 	then
 		echo $1
 	else
@@ -229,7 +364,21 @@ function max
 	fi
 }
 
-function max_item_size
+# TODO n items
+# array all the items
+# default min to first
+# for each check if lower
+function min # <integer|float> <integer|float>
+{
+	if [[ $(bc <<< "$1 < $2") -eq 1 ]]
+	then
+		echo $1
+	else
+		echo $2
+	fi
+}
+
+function max_item_size # <any>...
 {
 	local array=($@)
 	local max_size=0
@@ -240,17 +389,16 @@ function max_item_size
 	echo $max_size
 }
 
-# todo something???
-function prepare_tests
+function PrepareTests
 {
 	case "$TEST_CASE" in
 	FREQUENT)
-		THREAD_TESTS=(`extend_array ${THREAD_TESTS[@]} $UPPER`)
-		THREAD_TESTS=(`trim_array ${THREAD_TESTS[@]} $LOWER $UPPER`)
-		THREAD_TESTS=(`add_array_limits ${THREAD_TESTS[@]}`)
+		THREAD_TESTS=(`ExtendArray "${THREAD_TESTS[*]} " $UPPER`)
+		THREAD_TESTS=(`TrimArray "${THREAD_TESTS[*]} " $LOWER $UPPER`)
+		THREAD_TESTS=(`ArrayAddLimits ${THREAD_TESTS[@]}`)
 		;;
 	COMPLETE)
-		THREAD_TESTS=(`fill_array $LOWER $UPPER`)
+		THREAD_TESTS=(`FillArray $LOWER $UPPER`)
 		;;
 	esac
 }
@@ -262,10 +410,11 @@ function prepare_tests
 function benchmark
 {
 	local threads=$1
+	SetState "TEST $threads"
 	sysbench cpu --threads=$threads --time=$DURATION run
 }
 
-# todo awk?
+# TODO awk?
 function get_float
 {
 	local phrase=$@
@@ -300,7 +449,7 @@ function get_maximum
 	get_float $maximum
 }
 
-function run_tests
+function RunTests # empty
 {
 	for threads in ${THREAD_TESTS[@]}
 	do
@@ -310,8 +459,9 @@ function run_tests
 		LATENCY_AVERAGES+=(`get_average "$result"`)
 		LATENCY_MAXIMUMS+=(`get_maximum "$result"`)
 		
-		if [[ $threads -ne ${THREAD_TESTS[-1]} ]]
+		if [[ $DELAY -gt 0 && $threads -ne ${THREAD_TESTS[-1]} ]]
 		then
+			SetState 'WAIT'
 			sleep $DELAY
 		fi
 	done
@@ -321,34 +471,33 @@ function run_tests
 # PRINTING FUNCTIONS
 #########################################
 
-function plural
+function plural # <integer>
 {
-	if [[ $1 -gt 1 ]]
+	if [[ $1 -ne 1 ]]
 	then
-		echo "s"
+		printf 's'
 	fi
 }
 
-function section
+function plural_gap # <integer>
 {
-	echo ''
-	echo '################################'
-	printf "# %-28s #\n" "$@"
-	echo '################################'
-	echo ''
+	if [[ $1 -eq 1 ]]
+	then
+		printf ' '
+	fi
 }
 
-# todo more verbose name???
+# TODO more verbose name???
 # overall time left
 # operation time left
 # current operation
 # clear_status
-function erase
+function erase # empty
 {
 	printf "\033[1K\r"
 }
 
-function repeat
+function repeat # <string> <integer>
 {
 	local item=$1
 	local times=$2
@@ -358,13 +507,27 @@ function repeat
 	done
 }
 
-function progress_bar
+function ceiling # <float>
+{
+	local float=$(bc <<< "$1 + 0.5")
+	echo $(printf "%.0f" $float)
+}
+
+function floor # <float>
+{
+	local float=$(bc <<< "$1 - 0.5")
+	echo $(printf "%.0f" $float)
+}
+
+# TODO global precision??
+function ProgressBar # <float> <float> <integer>
 {
 	local progress=$1
 	local total=$2
 	local length=$3
 	
-	local parts=$(bc <<< "$progress * $length / $total" )
+	local parts=$(bc <<< "$length * $progress / $total")
+	      parts=$(min $parts $length)
 	
 	printf "[%-${length}s]" $(repeat "=" $parts)
 }
@@ -375,47 +538,64 @@ function timestamp
 	printf "%.3f" $time
 }
 
+# TODO refactor
+# TODO fix magic numbers
+function state_width
+{
+	local size=$(max_item_size ${THREAD_TESTS[@]})
+	echo $(( 9 + size )) 
+}
+
+# TODO progress bar dynamic width
+# TODO status ordering and appearance
 function status
 {
-	local duration=$(time_estimate)
+	local duration=$(TimeEstimate)
 	local start=$(timestamp)
 	local time_elapsed=0
 	local time_left=$duration
 	
-	while [[ $(bc <<< "$time_elapsed < $duration") -eq 1 ]]
+	local state_width=$(state_width)
+	
+	local continue=true
+	
+#	while [[ $(bc <<< "$time_elapsed < $duration") -eq 1 ]]
+	while $continue
 	do
-		# get state
-		bar=$(progress_bar $time_elapsed $duration 30)
+		local state=$(GetState)
+		local width=$(( `tput cols` - 30 )) # TODO magic number
+		local bar=$(ProgressBar $time_elapsed $duration $width)
 		
 		erase
-		printf "STATE %s %${#duration}.0fs" "$bar" $time_left
+		printf "%-${state_width}s" "$state"
+		printf " $bar"
+		printf " %${#duration}ds" $(ceiling $time_left)
 
-		sleep 0.05
+		sleep 0.0625
 		
-		time_elapsed=$(bc <<< "$(timestamp) - $start")
-		time_left=$(bc <<< "$duration - $time_elapsed")
+		if [[ $(bc <<< "$time_elapsed < $duration") -ne 1 ]]
+		then
+			continue=false
+		else
+			time_elapsed=$(bc <<< "$(timestamp) - $start")
+			time_left=$(bc <<< "$duration - $time_elapsed")
+		fi
 	done
 	erase
 }
 
-# todo more verbose name??? other versions???
-function print
-{
-	local threads=$1
-	local result=$2
-	local s=$(plural $threads)
-	echo "$threads Thread$s - $result"
-}
-
-function print_serial
+function PrintSerial
 {
 	for key in ${!THREAD_TESTS[@]}
 	do
-		print ${THREAD_TESTS[$key]} ${CPU_SPEEDS[$key]}
+		local threads=${THREAD_TESTS[$key]}
+		local s=$(plural $threads)
+		echo "$threads Thread$s - ${CPU_SPEEDS[$key]}"
 	done
 }
 
-function print_table
+# TODO use column command maybe
+function PrintTable
 {
 	local speed_width=$(max_item_size "${CPU_SPEEDS[@]}")
 	      speed_width=$(max $speed_width 5)
@@ -435,7 +615,7 @@ function print_table
 	done
 }
 
-function print_json
+function PrintJson
 {
 	printf '{\n'
 	printf '  "threads": [\n'
@@ -461,7 +641,7 @@ function print_json
 	printf '}\n'
 }
 
-function print_yaml
+function PrintYaml
 {
 	echo "threads:"
 	for key in ${!THREAD_TESTS[@]}
@@ -479,16 +659,16 @@ function print_results
 {
 	case $OUTPUT_MODE in
 	SERIAL)
-		print_serial
+		PrintSerial
 		;;
 	TABLE)
-		print_table
+		PrintTable
 		;;
 	JSON)
-		print_json
+		PrintJson
 		;;
 	YAML)
-		print_yaml
+		PrintYaml
 		;;
 	esac
 }
@@ -499,40 +679,91 @@ function print_results
 
 if $TEST_CODE; then
 
-section 'TESTING'
+Section 'TESTING'
 
-if is_installed sysbench
+wide=$(tput cols)
+(( wide -= 20 ))
+echo "columns: $wide"
+
+CheckFlags $@
+
+Section 'IS INTEGER TESTING'
+
+# TODO is_integer Assert
+
+if ! is_integer 0
 then
-	echo 'is_installed success!'
+	echo "bad 0"
+fi
+if ! is_integer 123
+then
+	echo "bad missed number"
+fi
+if ! is_integer -1
+then
+	echo "bad negatives"
+fi
+if is_integer 9.0
+then
+	echo "bad float"
+fi
+if is_integer a00a
+then
+	echo "bad mixed middle"
+fi
+if is_integer aa00
+then
+	echo "bad mixed beginning"
+fi
+if is_integer 00aa
+then
+	echo "bad mixed end"
+fi
+if is_integer "asdf movie"
+then
+	echo "bad string"
 fi
 
-extend_array 90
-extend_array 1 90
+Section 'CASE FUNCTIONALITY'
 
-printf "## %4s ##\n" 'TESTS'
+input=4
+printf 'case '
+case $input in
+	1)
+		echo '1'
+		;;
+	2 | 3)
+		echo '2 or 3'
+		;;
+	4)
+		printf '4 or '
+		;&
+	5)
+		echo '5'
+		;;
+esac
 
-printf '#####'
-printf '\033[1K'
-printf '\r==\n'
-printf "\068\n"
+Section 'SHARED STATE SYSTEM'
 
-timestamp
+CreateState
+echo $STATE_FILE
+CreateState
+echo $STATE_FILE
+SetState 'TEST' '5'
+GetState
+ClearState
+echo $STATE_FILE
 
-total=100
-length=30
-for i in $(seq 1 $total); do
-#	printf "\rProgress: %3d%%" $((i * 100 / total))
-	printf "\r%s" $(( $i * $length / $total ))
-	progress_bar $i $total $length
-	sleep 0.25
-done
-erase
 
-abort 'Testing section of code'
+printf 'REPEAT TEST '
+repeat 'o' 3
+printf '\n'
 
-debug
+echo $(timestamp)
 
-exit 0
+Debug
+
+Abort "End of testing."
 
 fi
 
@@ -542,64 +773,72 @@ fi
 
 check_dependencies
 
-# todo silent
-# korn shell reference
 # Set flags
-while getopts 'D:d:al:u:jtyY' OPTION
-do
-	#todo check if number
-	case "$OPTION" in
-	D)
-		DELAY=$OPTARG
-		;;
-	d) 
-		DURATION=$OPTARG
-		;;
-	a)
-		TEST_CASE='COMPLETE'
-		;;
-	l)
-		LOWER=$OPTARG
-		;;
-	u)
-		UPPER=$OPTARG
-		;;
-	j)
-		OUTPUT_MODE='JSON'
-		;;
-	t)
-		OUTPUT_MODE='TABLE'
-		;;
-	y)
-		OUTPUT_MODE='YAML'
-		;;
-	Y) # todo unnecessary feature, communicate time left instead
-		AUTO_ACCEPT=true
-		;;
-	*) # todo update and what is standard practice?
-		abort "script usage: $(basename \$0) [-d <integer>] [-l <integer>] [-u <integer>] [-e] [-j] [-t]"
-		;;
-	esac
-done
+#while getopts 'D:d:al:u:jtyY' OPTION
+#do
+#	#TODO check if number
+#	case "$OPTION" in
+#	D)
+#		DELAY=$OPTARG
+#		;;
+#	d) 
+#		DURATION=$OPTARG
+#		;;
+#	a)
+#		TEST_CASE='COMPLETE'
+#		;;
+#	l)
+#		LOWER=$OPTARG
+#		;;
+#	u)
+#		UPPER=$OPTARG
+#		;;
+#	j)
+#		OUTPUT_MODE='JSON'
+#		(( OUTPUT_SETS += 1 ))
+#		;;
+#	t)
+#		OUTPUT_MODE='TABLE'
+#		(( OUTPUT_SETS += 1 ))
+#		;;
+#	y)
+#		OUTPUT_MODE='YAML'
+#		(( OUTPUT_SETS += 1 ))
+#		;;
+#	*) # TODO update and what is standard practice?
+#		Abort "script usage: $(basename \$0) [-d <integer>] [-l <integer>] [-u <integer>] [-e] [-j] [-t]"
+#		;;
+#	esac
+#done
 
-shift "$(( $OPTIND - 1 ))"
+#shift "$(( $OPTIND - 1 ))"
 
-prepare_tests
+#if [[ $OUTPUT_SETS -gt 1 ]]
+#then
+#	Abort 'Multiple data display methods requested.'
+#fi
 
-confirmation
+CheckFlags $@
 
-status
+PrepareTests
 
-run_tests
+if ! $SILENT
+then
+	CreateState
+	RunJobs status
+fi
 
-# todo status and clear status
-# todo remove confirmation
-# todo add --verbose flags
-# todo remove unused functions
-# todo remove testing section
-# todo error when reseting output mode 2+ times
-# todo fail when upper and lower limits exceeded
-# todo fail when no tests
+RunTests
+
+WaitJobs
+ClearState
+
+# TODO restyle function names
+# TODO remove unused functions
+# TODO remove testing section
+# TODO script usage function
+# TODO test is_integer
+# TODO use format
 
 print_results
 
