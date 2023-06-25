@@ -1,8 +1,6 @@
 #!/bin/bash
 
-#########################################
-# GLOBAL VARIABLES
-#########################################
+# GLOBAL VARIABLES =============================================================
 
 TEST_CODE=false # TODO remove
 
@@ -36,11 +34,9 @@ START_TIME=0
 END_TIME=0
 
 
-#########################################
-# FUNCTIONS
-#########################################
+# FUNCTIONS ====================================================================
 
-function Debug
+function Debug # no arguments
 {
 	Section 'DEBUG'
 	echo "TEST_CODE          : $TEST_CODE"
@@ -59,6 +55,13 @@ function Debug
 	echo "OUTPUT_SET         : $OUTPUT_SET"
 }
 
+function Abort # <string>
+{
+	local message="$@"
+	echo "ABORT - $message" >&2 # TODO ensure stderr output
+	exit 1
+}
+
 function Assert # <token> <token> <message>
 {
 	local measured="$1"
@@ -67,15 +70,31 @@ function Assert # <token> <token> <message>
 
 	if [[ "$measured" != "$expected" ]]
 	then
+		echo "Measured: '$measured'"
+		echo "Expected: '$expected'"
 		Abort "$message"
 	fi
 }
 
-function Section
+function Help # no arguments
+{
+	echo "Usage: bash $0"
+	echo "-a | --all        Test with every thread count in range"
+	echo "-l | --lower      Set lower thread count bound"
+	echo "-u | --upper      Set upper thread count bound"
+	echo "-d | --duration   Set seconds of test duration"
+	echo "-D | --delay      Set seconds of delay between tests"
+	echo "-j | --json       Results output in JSON format"
+	echo "-y | --yaml       Results output in YAML format"
+	echo "-t | --table      Results output as an ASCII table"
+	echo "-s | --silent     Suppress output during testing"
+}
+
+function Section # <string>
 {
 	local message="$@"
-	local length=$(max 28 ${#message})
-	local bridge="##$(repeat '#' $length)##"
+	local length=$(Maximum 28 ${#message})
+	local bridge="##$(Repeat '#' $length)##"
 	
 	printf "\n$bridge\n"
 	printf "# %-${length}s #" "$@"
@@ -83,7 +102,7 @@ function Section
 }
 
 # TODO tput column mktemp
-function check_dependencies
+function CheckDependencies # no arguments
 {
 	if ! command -v sysbench &> /dev/null
 	then
@@ -98,57 +117,66 @@ function check_dependencies
 function CheckFlags # <flags> <flag argument>...
 {
 	local checking=true
-	while [[ checking && $# -gt 0 ]]
+	while $checking && [[ $# -gt 0 ]]
 	do
 		case $1 in
-		--all|-a)
+		-a|--all)
 			TEST_CASE='COMPLETE'
 			;;
-		--lower|-l)
+		-l|--lower)
 			LOWER=$2
 			shift
 			;;
-		--upper|-u)
+		-u|--upper)
 			UPPER=$2
 			shift
 			;;
 			
-		--delay|-D)
+		-D|--delay)
 			DELAY=$2
 			shift
 			;;
-		--duration|-d)
+		-d|--duration)
 			DURATION=$2
 			shift
 			;;
-			
-		--json|-j)
+		-j|--json)
 			OUTPUT_MODE='JSON'
 			(( OUTPUT_SETS += 1 ))
 			;;
-		--table|-t)
+		-t|--table)
 			OUTPUT_MODE='TABLE'
 			(( OUTPUT_SETS += 1 ))
 			;;
-		--yaml|-y)
+		-y|--yaml)
 			OUTPUT_MODE='YAML'
 			(( OUTPUT_SETS += 1 ))
 			;;
 			
-		--silent|-s)
+		-s|--silent)
 			SILENT=true
 			;;
 		--) # might not handle alternate flags well
+			echo 'no more flags'
 			checking=false
 			;;
 		*)	# TODO write this message
-			Abort "format error message goes here"
+			#Help >&2
+			#exit 1
+			Abort "bash cpu-bench.sh [-a | --all] [-s | --silent] [--delay <seconds>] [--duration <seconds>] [-l <pos int>] [-u <pos int>] [--json | --table | --yaml] [--] [<threads>]"
 			;;
 		esac
 		
 		shift
 	done
 	
+	TestGlobals
+	
+#	echo $@ # TODO do something with leftover arguments??
+}
+
+function TestGlobals
+{
 	if [[ $OUTPUT_SETS -gt 1 ]]
 	then
 		Abort 'Multiple data display methods requested.'
@@ -161,56 +189,71 @@ function CheckFlags # <flags> <flag argument>...
 	
 	if [[ $UPPER -gt 8192 ]]
 	then
-		Abort 'Upeer thread limit cannot exceed 8192.'
+		Abort 'Upper thread limit cannot exceed 8192.'
 	fi
 	
 	if [[ $UPPER -lt $LOWER ]]
 	then
 		Abort "Impossible threads range ($LOWER-$UPPER)."
 	fi
-	
-#	echo $@ # TODO do something with leftover arguments??
 }
 
-# TODO test this
-# TODO use this
-function is_integer
+# TODO move functions around to better consider call order
+function GetInteger # <string>
+# stdout <integer> or nothing 
 {
-	result=0
-	case $1 in
-	*[!0-9]* | '')
+	local integers=(`echo $@ | grep -o '\-\?[0-9]\+'`)
+	echo $integers # only the first item
+}
+
+function IsInteger # <integer?>
+{
+	local input="$1"
+	local result=0
+	if [[ "$input" != "$(GetInteger $input)" ]]
+	then
 		result=1
-		;;
-	esac
+	fi
 	return $result
 }
 
-function TimeEstimate
+IsInteger 0
+Assert $? 0 "IsInteger: Can't match single integer."
+
+IsInteger 123
+Assert $? 0 "IsInteger: Can't match multiple integer."
+
+IsInteger 9.0
+Assert $? 1 "IsInteger: Matched a float"
+
+IsInteger a00a
+Assert $? 1 "IsInteger: Matched mixed number."
+
+IsInteger "asdf movie"
+Assert $? 1 "IsInteger: Matched string."
+
+IsInteger -1
+Assert $? 0 "IsInteger: Can't match negative number."
+
+function TimeEstimate # no arguments
 {
 	local test_count=${#THREAD_TESTS[@]}
 	local delay_count=$(( $test_count - 1 ))
 	echo $(( $DURATION * $test_count + $DELAY * $delay_count ))
 }
 
-function Abort
-{
-	local message="$@"
-	echo $message >&2
-	echo 'Aborting.'
-	exit 1
-}
-
 # TODO trap temp file
-function CreateState
+function CreateState # no arguments
 {
+	trap 'Clean' SIGINT
+	trap 'Clean' SIGTERM
 	if [[ ! -e $STATE_FILE ]]
 	then
 		STATE_FILE=$(mktemp)
 	fi
-	trap 'ClearState' SIGINT # TODO what is the best place for a SIGINT trap?
 }
 
-function ClearState
+function ClearState # no arguments
 {
 	if [[ -e $STATE_FILE ]]
 	then
@@ -219,7 +262,7 @@ function ClearState
 	STATE_FILE=''
 }
 
-function GetState
+function GetState # no arguments
 {
 	if [[ -e $STATE_FILE ]]
 	then
@@ -227,7 +270,7 @@ function GetState
 		case ${state[0]} in
 		TEST)
 			local threads=${state[1]}
-			local size=$(max_item_size ${THREAD_TESTS[@]})
+			local size=$(MaxItemSize ${THREAD_TESTS[@]})
 			printf "Threads: %-${size}d" $threads
 			;;
 		WAIT)
@@ -248,36 +291,19 @@ function SetState # <task name> <thread number>
 	fi
 }
 
-function RunJobs # <string>...
-{
-	while [[ $# -gt 0 ]]
-	do
-		$1 &
-		BACKGROUND_JOBS=${!}
-		shift
-	done
-}
-
-function WaitJobs
-{
-	for pid in ${BACKGROUND_JOBS[@]}
-	do
-		wait $pid
-	done
-}
-
 # TODO look into proper job control to kill all on SIGINT
-function KillJobs
+function Clean # no entries
 {
-	for pid in ${BACKGROUND_JOBS[@]}
-	do
-		kill $pid
-	done
+#	for pid in ${BACKGROUND_JOBS[@]}
+#	do
+#		kill $pid
+#	done
+	Erase
+	killall -s SIGINT
+	ClearState
 }
 
-#########################################
-# ARRAY FUNCTIONS
-#########################################
+# ARRAY FUNCTIONS ==============================================================
 
 function TrimArray # "<array> " <integer> <integer>
 {
@@ -354,7 +380,7 @@ function Length # <any>...
 	echo ${#input}
 }
 
-function max # <integer> <integer>
+function Maximum # <integer> <integer>
 {
 	if [[ $(bc <<< "$1 > $2") -eq 1 ]]
 	then
@@ -364,11 +390,7 @@ function max # <integer> <integer>
 	fi
 }
 
-# TODO n items
-# array all the items
-# default min to first
-# for each check if lower
-function min # <integer|float> <integer|float>
+function Minimum # <integer|float> <integer|float>
 {
 	if [[ $(bc <<< "$1 < $2") -eq 1 ]]
 	then
@@ -378,18 +400,18 @@ function min # <integer|float> <integer|float>
 	fi
 }
 
-function max_item_size # <any>...
+function MaxItemSize # <any>...
 {
 	local array=($@)
 	local max_size=0
 	for item in ${array[@]}
 	do
-		max_size=$(max $max_size ${#item})
+		max_size=$(Maximum $max_size ${#item})
 	done
 	echo $max_size
 }
 
-function PrepareTests
+function PrepareTests # no arguments
 {
 	case "$TEST_CASE" in
 	FREQUENT)
@@ -403,11 +425,9 @@ function PrepareTests
 	esac
 }
 
-#########################################
-# BENCHMARK FUNCTIONS
-#########################################
+# BENCHMARK FUNCTIONS ==========================================================
 
-function benchmark
+function Benchmark # <integer>
 {
 	local threads=$1
 	SetState "TEST $threads"
@@ -415,49 +435,61 @@ function benchmark
 }
 
 # TODO awk?
-function get_float
+function GetFloat # <string>
 {
 	local phrase=$@
 	echo $phrase | grep -o '[0-9]\+.[0-9]\+'
 }
 
-function get_speed
+function GetInteger # <string>
+# stdout <integer> or nothing 
+{
+	local integers=(`echo $@ | grep -o '\-\?[0-9]\+'`)
+	echo $integers # only the first item
+}
+
+Assert " $(GetInteger 'empty phrase')" ' ' 'Found something in an empty phrase.'
+Assert " $(GetInteger Phrase 34 holds a number)" ' 34' 'Cannot catch positive number.'
+Assert " $(GetInteger 'You have -34 apples')"   ' -34' 'Cannot catch negative number.'
+Assert " $(GetInteger 'Here are 34.56 apples')"  ' 34' 'Catches multiple numbers.'
+
+function GetSpeed # <string>
 {
 	local benchmark=$@
 	local speed=$(echo "$benchmark" | grep 'events per second')
-	get_float $speed
+	GetFloat $speed
 }
 
-function get_minimum
+function GetMinimum # <string>
 {
 	local benchmark=$@
 	local minimum=$(echo "$benchmark" | grep 'min:')
-	get_float $minimum
+	GetFloat $minimum
 }
 
-function get_average
+function GetAverage # <string>
 {
 	local benchmark=$@
 	local average=$(echo "$benchmark" | grep 'avg:')
-	get_float $average
+	GetFloat $average
 }
 
-function get_maximum
+function GetMaximum # <string>
 {
 	local benchmark=$@
 	local maximum=$(echo "$benchmark" | grep 'max:')
-	get_float $maximum
+	GetFloat $maximum
 }
 
-function RunTests # empty
+function RunTests # no arguments
 {
 	for threads in ${THREAD_TESTS[@]}
 	do
-		local result=$(benchmark $threads)
-		CPU_SPEEDS+=(`get_speed "$result"`)
-		LATENCY_MINIMUMS+=(`get_minimum "$result"`)
-		LATENCY_AVERAGES+=(`get_average "$result"`)
-		LATENCY_MAXIMUMS+=(`get_maximum "$result"`)
+		local result=$(Benchmark $threads)
+		CPU_SPEEDS+=(`GetSpeed "$result"`)
+		LATENCY_MINIMUMS+=(`GetMinimum "$result"`)
+		LATENCY_AVERAGES+=(`GetAverage "$result"`)
+		LATENCY_MAXIMUMS+=(`GetMaximum "$result"`)
 		
 		if [[ $DELAY -gt 0 && $threads -ne ${THREAD_TESTS[-1]} ]]
 		then
@@ -467,11 +499,9 @@ function RunTests # empty
 	done
 }
 
-#########################################
-# PRINTING FUNCTIONS
-#########################################
+# PRINTING FUNCTIONS ===========================================================
 
-function plural # <integer>
+function Plural # <integer>
 {
 	if [[ $1 -ne 1 ]]
 	then
@@ -479,7 +509,7 @@ function plural # <integer>
 	fi
 }
 
-function plural_gap # <integer>
+function EssGap # <integer>
 {
 	if [[ $1 -eq 1 ]]
 	then
@@ -487,17 +517,12 @@ function plural_gap # <integer>
 	fi
 }
 
-# TODO more verbose name???
-# overall time left
-# operation time left
-# current operation
-# clear_status
-function erase # empty
+function EraseLine # no arguments
 {
 	printf "\033[1K\r"
 }
 
-function repeat # <string> <integer>
+function Repeat # <string> <integer>
 {
 	local item=$1
 	local times=$2
@@ -507,13 +532,13 @@ function repeat # <string> <integer>
 	done
 }
 
-function ceiling # <float>
+function Ceiling # <float>
 {
 	local float=$(bc <<< "$1 + 0.5")
 	echo $(printf "%.0f" $float)
 }
 
-function floor # <float>
+function Floor # <float>
 {
 	local float=$(bc <<< "$1 - 0.5")
 	echo $(printf "%.0f" $float)
@@ -527,12 +552,12 @@ function ProgressBar # <float> <float> <integer>
 	local length=$3
 	
 	local parts=$(bc <<< "$length * $progress / $total")
-	      parts=$(min $parts $length)
+	      parts=$(Minimum $parts $length)
 	
-	printf "[%-${length}s]" $(repeat "=" $parts)
+	printf "[%-${length}s]" $(Repeat "=" $parts)
 }
 
-function timestamp
+function Timestamp
 {
 	local time=$(date +"%s.%N")
 	printf "%.3f" $time
@@ -540,22 +565,22 @@ function timestamp
 
 # TODO refactor
 # TODO fix magic numbers
-function state_width
+function StateWidth
 {
-	local size=$(max_item_size ${THREAD_TESTS[@]})
+	local size=$(MaxItemSize ${THREAD_TESTS[@]})
 	echo $(( 9 + size )) 
 }
 
 # TODO progress bar dynamic width
 # TODO status ordering and appearance
-function status
+function Status
 {
 	local duration=$(TimeEstimate)
-	local start=$(timestamp)
+	local start=$(Timestamp)
 	local time_elapsed=0
 	local time_left=$duration
 	
-	local state_width=$(state_width)
+	local state_width=$(StateWidth)
 	
 	local continue=true
 	
@@ -566,10 +591,10 @@ function status
 		local width=$(( `tput cols` - 30 )) # TODO magic number
 		local bar=$(ProgressBar $time_elapsed $duration $width)
 		
-		erase
+		EraseLine
 		printf "%-${state_width}s" "$state"
 		printf " $bar"
-		printf " %${#duration}ds" $(ceiling $time_left)
+		printf " %${#duration}ds" $(Ceiling $time_left)
 
 		sleep 0.0625
 		
@@ -577,11 +602,11 @@ function status
 		then
 			continue=false
 		else
-			time_elapsed=$(bc <<< "$(timestamp) - $start")
+			time_elapsed=$(bc <<< "$(Timestamp) - $start")
 			time_left=$(bc <<< "$duration - $time_elapsed")
 		fi
 	done
-	erase
+	EraseLine
 }
 
 function PrintSerial
@@ -589,7 +614,7 @@ function PrintSerial
 	for key in ${!THREAD_TESTS[@]}
 	do
 		local threads=${THREAD_TESTS[$key]}
-		local s=$(plural $threads)
+		local s=$(Plural $threads)
 		echo "$threads Thread$s - ${CPU_SPEEDS[$key]}"
 	done
 }
@@ -597,9 +622,9 @@ function PrintSerial
 # TODO use column command maybe
 function PrintTable
 {
-	local speed_width=$(max_item_size "${CPU_SPEEDS[@]}")
-	      speed_width=$(max $speed_width 5)
-	local divider="--------+-$(repeat '-' $speed_width)-+---------+---------+---------"
+	local speed_width=$(MaxItemSize "${CPU_SPEEDS[@]}")
+	      speed_width=$(Maximum $speed_width 5)
+	local divider="--------+-$(Repeat '-' $speed_width)-+---------+---------+---------"
 	
 	printf "THREADS | %-${speed_width}s | MINIMUM | AVERAGE | MAXIMUM\n" 'SPEED'
 	
@@ -655,7 +680,7 @@ function PrintYaml
 	done
 }
 
-function print_results
+function PrintResults
 {
 	case $OUTPUT_MODE in
 	SERIAL)
@@ -673,9 +698,7 @@ function print_results
 	esac
 }
 
-#########################################
-# TESTING CODE
-#########################################
+# TESTING CODE =================================================================
 
 if $TEST_CODE; then
 
@@ -686,43 +709,6 @@ wide=$(tput cols)
 echo "columns: $wide"
 
 CheckFlags $@
-
-Section 'IS INTEGER TESTING'
-
-# TODO is_integer Assert
-
-if ! is_integer 0
-then
-	echo "bad 0"
-fi
-if ! is_integer 123
-then
-	echo "bad missed number"
-fi
-if ! is_integer -1
-then
-	echo "bad negatives"
-fi
-if is_integer 9.0
-then
-	echo "bad float"
-fi
-if is_integer a00a
-then
-	echo "bad mixed middle"
-fi
-if is_integer aa00
-then
-	echo "bad mixed beginning"
-fi
-if is_integer 00aa
-then
-	echo "bad mixed end"
-fi
-if is_integer "asdf movie"
-then
-	echo "bad string"
-fi
 
 Section 'CASE FUNCTIONALITY'
 
@@ -756,10 +742,10 @@ echo $STATE_FILE
 
 
 printf 'REPEAT TEST '
-repeat 'o' 3
+Repeat 'o' 3
 printf '\n'
 
-echo $(timestamp)
+echo $(Timestamp)
 
 Debug
 
@@ -767,11 +753,9 @@ Abort "End of testing."
 
 fi
 
-#########################################
-# SCRIPT MAIN BODY
-#########################################
+# SCRIPT MAIN BODY =============================================================
 
-check_dependencies
+CheckDependencies
 
 # Set flags
 #while getopts 'D:d:al:u:jtyY' OPTION
@@ -825,21 +809,21 @@ PrepareTests
 if ! $SILENT
 then
 	CreateState
-	RunJobs status
+	Status &
 fi
 
 RunTests
 
-WaitJobs
+wait
 ClearState
 
 # TODO restyle function names
 # TODO remove unused functions
 # TODO remove testing section
 # TODO script usage function
-# TODO test is_integer
+# TODO test IsInteger
 # TODO use format
 
-print_results
+PrintResults
 
 exit 0
